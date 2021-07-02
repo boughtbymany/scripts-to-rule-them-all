@@ -1,0 +1,117 @@
+#!/usr/bin/env python
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+from typing import Dict, List
+
+import jmespath
+import toml
+
+LIGHT_PURPLE = "\033[1;35m"
+NO_COLOR = "\033[0m"
+
+TRANTOR_TEMPLATE = "trantor lambda set code -a '{account}' -s '{squad}'"
+
+
+class DefaultHelpParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_help()
+        sys.exit(2)
+
+
+async def parse_arguments() -> argparse.Namespace:
+    parser = DefaultHelpParser(prog="./scripts/deploy")
+    parser.add_argument(
+        "location",
+        metavar="loc",
+        nargs=1,
+        help="Location, ex.: all - dev - stag - prod - uk - us - uk/dev - uk/stag - uk/prod",
+    )
+    parser.add_argument(
+        "--ref",
+        help="GIT Ref, ex.: 349c0fab077fe21445d307c4a0f96eb9e92c3764",
+    )
+    return parser.parse_args()
+
+
+async def get_config() -> Dict:
+    config_filename = Path(__file__).parent / "../pyproject.toml"
+    with open(config_filename) as f:
+        return toml.load(f)["scripts"]["config"]
+
+
+async def get_envs(config: Dict, location: str, environment: str = None) -> List[Dict]:
+    if environment:
+        return jmespath.search(f"{location}.[{environment[0]}]", config)
+    if location in ["dev", "stag", "prod"]:
+        return jmespath.search(f"*.{location}", config)
+    return jmespath.search(f"{location}.*", config)
+
+
+async def run_shell_command(shell_command: str) -> int:
+    print(f"{LIGHT_PURPLE}$ {shell_command}{NO_COLOR}")
+    proc = await asyncio.create_subprocess_shell(shell_command)
+    await proc.communicate()
+    return proc.returncode
+
+
+async def run_list_shell_commands(commands: List[str]) -> bool:
+    success = []
+    for completed in asyncio.as_completed(
+        [run_shell_command(command) for command in commands]
+    ):
+        return_code = await completed
+        success.append(return_code == 0)
+    return all(success)
+
+
+async def get_commands(
+    config: Dict, location: str, environment: str = None, ref: str = None
+) -> List[str]:
+    prod_envs = jmespath.search("*.prod", config)
+    commands = []
+    for env in await get_envs(config, location, environment):
+        command = TRANTOR_TEMPLATE.format(**env)
+        if ref:
+            command += f" --ref {ref}"
+        elif env in prod_envs:
+            command += " --ref master"
+        else:
+            command += " --this-branch"
+        commands += [command]
+    return commands
+
+
+async def main() -> None:
+    config = await get_config()
+    args = await parse_arguments()
+
+    location, *environment = args.location[0].lower().split("/")
+    environment = environment[0] if environment else None
+    ref = args.ref
+
+    if location != "all":
+        commands = await get_commands(config, location, environment, ref)
+        if not await run_list_shell_commands(commands):
+            sys.exit("Problem during deployment")
+    else:
+        commands = await get_commands(config, location="dev", ref=ref)
+        if not await run_list_shell_commands(commands):
+            sys.exit("Problem when deploy to dev environment")
+            return
+
+        commands = await get_commands(config, location="stag", ref=ref)
+        if not await run_list_shell_commands(commands):
+            sys.exit("Problem when deploy to stag environment")
+            return
+
+        commands = await get_commands(config, location="prod", ref=ref)
+        if not await run_list_shell_commands(commands):
+            sys.exit("Problem when deploy to prod environment")
+
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(main())
+    loop.close()

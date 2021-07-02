@@ -1,0 +1,94 @@
+#!/usr/bin/env python
+import argparse
+import sys
+from pathlib import Path
+from subprocess import run
+from typing import Dict, List
+
+import jmespath
+import toml
+
+LIGHT_PURPLE = "\033[1;35m"
+NO_COLOR = "\033[0m"
+
+TRANTOR_TEMPLATE = "trantor lambda set runtime -a '{account}' -s '{squad}' --no-deploy --lambda {lamb} --value {version}"
+
+
+class DefaultHelpParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_help()
+        sys.exit(2)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = DefaultHelpParser(prog="./scripts/set-runtime")
+    parser.add_argument(
+        "location",
+        metavar="loc",
+        nargs=1,
+        help="Location, ex.: uk/dev - uk/stag - uk/prod",
+    )
+    parser.add_argument(
+        "version",
+        metavar="ver",
+        nargs=1,
+        help="Version, ex.: python3.8",
+    )
+    return parser.parse_args()
+
+
+def get_config() -> Dict:
+    config_filename = Path(__file__).parent / "../pyproject.toml"
+    with open(config_filename) as f:
+        return toml.load(f)["scripts"]["config"]
+
+
+def get_envs(args: argparse.Namespace) -> List[Dict]:
+    config = get_config()
+    location = args.location[0]
+    assert "/" in location, "Location must specify country and environment. ex.: uk/dev"
+    location, environment = location.lower().split("/")
+    return jmespath.search(f"{location}.[{environment}]", config)
+
+
+# trantor squad get -a 'BBM Dev' -s 's-claim-dev' | jq ".config.lambdas | keys"
+LAMBDAS = [
+    "api",
+    "apply_cipit_rules",
+    "approve_calculation",
+    "cipit_decision_sampler",
+    "cipit_submit_to_covea",
+    "create_payment_record",
+    "evaluate_farewell_rule",
+    "handle_errors",
+    "make_calculation",
+    "notify_activity",
+    "routing_decision",
+    "store_cipit_decisions",
+    "submit_covea",
+    "withdraw_calculation",
+]
+
+
+def call_trantor() -> None:
+    args = parse_arguments()
+    version = args.version[0].lower()
+
+    for env in get_envs(args):
+        for lamb in LAMBDAS:
+            command = TRANTOR_TEMPLATE.format(
+                account=env["account"],
+                squad=env["squad"],
+                lamb=lamb,
+                version=version,
+            )
+            print(f"{LIGHT_PURPLE}$ {command}{NO_COLOR}")
+            run(command, shell=True)
+
+
+def main() -> None:
+    call_trantor()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

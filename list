@@ -1,0 +1,115 @@
+#!/usr/bin/env python
+import argparse
+import json
+import sys
+import time
+from collections import defaultdict
+from pathlib import Path
+from subprocess import PIPE, Popen
+from typing import Dict, List
+
+import jmespath
+import toml
+
+BLUE = "\033[0;34m"
+LIGHT_PURPLE = "\033[1;35m"
+NO_COLOR = "\033[0m"
+
+TRANTOR_TEMPLATE = (
+    "trantor deploy list --no-spin --no-tabulate -n 1 -a '{account}' -s '{squad}'"
+)
+
+
+class DefaultHelpParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_help()
+        sys.exit(2)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = DefaultHelpParser(prog="./scripts/list")
+    parser.add_argument(
+        "location",
+        metavar="loc",
+        nargs=1,
+        help="Location, ex.: all - dev - stag - prod - uk - us - uk/dev - uk/stag - uk/prod",
+    )
+    return parser.parse_args()
+
+
+def get_config() -> Dict:
+    config_filename = Path(__file__).parent / "../pyproject.toml"
+    with open(config_filename) as f:
+        return toml.load(f)["scripts"]["config"]
+
+
+def get_envs() -> List[Dict]:
+    args = parse_arguments()
+    config = get_config()
+
+    location, *environment = args.location[0].lower().split("/")
+
+    if environment:
+        return jmespath.search(f"{location}.[{environment[0]}]", config)
+    if location == "all":
+        return jmespath.search("*.*[]", config)
+    if location in ["dev", "stag", "prod"]:
+        return jmespath.search(f"*.{location}", config)
+    return jmespath.search(f"{location}.*", config)
+
+
+def call_trantor(envs: List[Dict]) -> None:
+    for env in envs:
+        command = TRANTOR_TEMPLATE.format(**env)
+        print(f"{LIGHT_PURPLE}$ {command}{NO_COLOR}")
+        env["execution"] = Popen(command, shell=True, stdout=PIPE)
+    print()
+
+
+def wait_all_ready(envs: List[Dict]) -> None:
+    while {*[env["execution"].poll() for env in envs]} != {0}:
+        time.sleep(1)
+
+
+def read_stdout(envs: List[Dict]) -> None:
+    for env in envs:
+        env["result"] = json.load(env["execution"].stdout)[0]
+
+
+def mix_results(envs: List[Dict]) -> Dict[str, list]:
+    result = defaultdict(list)
+    for env in envs:
+        for k, v in env["result"].items():
+            result[k].append(v)
+    return result
+
+
+def figure_out_print_format(result: Dict[str, list]) -> str:
+    print_format = ""
+    for k, v in result.items():
+        max_len = max([len(k)] + [len(i) for i in v])
+        print_format += f"{{{k}:<{max_len}}} "
+    return print_format
+
+
+def print_results(envs: List[Dict], result: Dict[str, list], print_format: str) -> None:
+    header = print_format.format(**{k: k for k in result.keys()})
+    print(f"{BLUE}{header}{NO_COLOR}")
+    for env in envs:
+        keys = [*env["result"].keys()]
+        values = [env["result"][k] for k in keys]
+        print(print_format.format(**{k: v for k, v in zip(keys, values)}))
+
+
+def main() -> None:
+    envs = get_envs()
+    call_trantor(envs)
+    wait_all_ready(envs)
+    read_stdout(envs)
+    result = mix_results(envs)
+    print_format = figure_out_print_format(result)
+    print_results(envs, result, print_format)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,64 @@
+#!/usr/bin/env python
+import argparse
+import sys
+from pathlib import Path
+from subprocess import run
+from typing import Dict, List
+
+import jmespath
+import toml
+
+LIGHT_PURPLE = "\033[1;35m"
+NO_COLOR = "\033[0m"
+
+WRENCH_TEMPLATE = "wrench deploy trantor -a '{account}' -s '{squad}' --trantor-profile deployment --rollback"
+
+
+class DefaultHelpParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.print_help()
+        sys.exit(2)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = DefaultHelpParser(prog="./scripts/rollback")
+    parser.add_argument(
+        "location",
+        metavar="loc",
+        nargs=1,
+        help="Location, ex.: all - dev - stag - prod - uk - us - uk/dev - uk/stag - uk/prod",
+    )
+    return parser.parse_args()
+
+
+def get_config() -> Dict:
+    config_filename = Path(__file__).parent / "../pyproject.toml"
+    with open(config_filename) as f:
+        return toml.load(f)["scripts"]["config"]
+
+
+def get_envs() -> List[Dict]:
+    args = parse_arguments()
+    config = get_config()
+
+    location, *environment = args.location[0].lower().split("/")
+
+    if environment:
+        return jmespath.search(f"{location}.[{environment[0]}]", config)
+    if location == "all":
+        return jmespath.search("*.*[]", config)
+    if location in ["dev", "stag", "prod"]:
+        return jmespath.search(f"*.{location}", config)
+    return jmespath.search(f"{location}.*", config)
+
+
+def main() -> None:
+    for env in get_envs():
+        command = WRENCH_TEMPLATE.format(**env)
+        print(f"{LIGHT_PURPLE}$ {command}{NO_COLOR}")
+        print()
+        run(command, shell=True)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
